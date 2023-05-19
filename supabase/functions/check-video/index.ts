@@ -2,14 +2,15 @@
 // https://deno.land/manual/getting_started/setup_your_environment
 // This enables autocomplete, go to definition, etc.
 
-
-import { config } from "https://deno.land/x/dotenv/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+import { corsHeaders } from '../_shared/cors.ts'
 import { DOMParser } from 'https://deno.land/x/deno_dom/deno-dom-wasm.ts';
 import { OpenAI } from "https://deno.land/x/openai/mod.ts";
 
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!;
 const TRANSCRIPT_PROVIDER = Deno.env.get('TRANSCRIPT_PROVIDER')!;
+const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL')!;
+const MAX_TRANSCRIPT_LENGTH = Deno.env.get('MAX_TRANSCRIPT_LENGTH')!;
 
 console.log ("OPENAI_API_KEY:", OPENAI_API_KEY);
 const openAI = new OpenAI(OPENAI_API_KEY);
@@ -17,36 +18,57 @@ const openAI = new OpenAI(OPENAI_API_KEY);
 console.log("Hello from Functions!")
 
 serve(async (req) => {
-  const json = await req.json();
 
-  const videoUrl = json.url;
+  // This is needed if you're planning to invoke your function from a browser.
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
 
-  console.log("About to get video transcript for video Url:", videoUrl);
+  try {
+      const json = await req.json();
 
-  const transcript = await getCaptions(videoUrl);
+      const videoUrl = json.url;
+    
+      console.log("About to get video transcript for video Url:", videoUrl);
+    
+      var transcript = await getCaptions(videoUrl);
+      transcript = clipTranscript(transcript);
+    
+      console.log("About to return response with transcript:", transcript);
+    
+      const chatCompletion = await openAI.createChatCompletion({
+        model: OPENAI_MODEL,
+        temperature: 0,
+        messages: [
+          { "role": "system", "content": "Imagine you are a parent of an impressionable tween. I am going to provide the transcript of a youtube video and I want you to review the content and provide the following bits of information formatted as a json object a) summary: a brief summary of the content b) bad_language: a number from 0 to 10 where 0 means the transcript contains no swearing at all and 10 is a lot of really bad swearing c) sexual_content: a number from 0 to 10 where 0 is no sexual content at all and 10 is loads of sexual content d) coercion: a number from 0 to 10 indicating how much coercion occurred (i.e. the host is trying to get the viewer to do something in particular) e) min_age_rating: the minimum age of a child that should be watching such a video f) notes: an array containing any interesting or weird things that might be of interest to a parent. Transcript follows. IMPORTANT: your response must be a JSON string." },
+          { "role": "assistant", "content": transcript },
+        ],
+      });
+    
+      console.log("About to return response with chat completion:", chatCompletion);
+    
+      const content = chatCompletion.choices[0].message.content;
 
-  console.log("About to return response with transcript:", transcript);
-
-  const chatCompletion = await openAI.createChatCompletion({
-    model: "gpt-3.5-turbo",
-    temperature: 0,
-    messages: [
-      { "role": "system", "content": "Imagine you are a parent of an impressionable tween. I am going to provide the transcript of a youtube video and I want you to review the content and provide the following bits of information formatted as a json object a) summary: a brief summary of the content b) bad_language: a number from 0 to 10 where 0 means the transcript contains no swearing at all and 10 is a lot of really bad swearing c) sexual_content: a number from 0 to 10 where 0 is no sexual content at all and 10 is loads of sexual content d) coercion: a number from 0 to 10 indicating how much coercion occurred (i.e. the host is trying to get the viewer to do something in particular) e) min_age_rating: the minimum age of a child that should be watching such a video f) notes: an array containing any interesting or weird things that might be of interest to a parent. Transcript follows: " },
-      { "role": "assistant", "content": transcript },
-    ],
-  });
-
-  console.log("About to return response with chat completion:", chatCompletion);
-
-  const content = chatCompletion.choices[0].message.content;
-
-  console.log("About to return response with content:", content);
-
-  return new Response(
-    content,
-    { headers: { "Content-Type": "application/json" } },
-  )
+    return new Response(content, {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 200,
+    })
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 400,
+    })
+  }
 })
+
+function clipTranscript(transcript: string): string {
+  console.log("*** Transcript length:", transcript.length);
+  if ( transcript.length <= MAX_TRANSCRIPT_LENGTH ) {
+    return transcript;
+  }
+  console.log("*** Transcript is too long, clipping to:", MAX_TRANSCRIPT_LENGTH);
+  return transcript.substring(0, MAX_TRANSCRIPT_LENGTH);
+}
 
 async function getCaptions(videoUrl: string): Promise<string> {
   if (TRANSCRIPT_PROVIDER === 'captionsgrabber') {
@@ -72,7 +94,7 @@ async function getCaptionsFromYoutubeTranscript(videoUrl: string): Promise<strin
 
   const html = await response.text();
 
-  console.log("About to parse trancsript response", html);
+  console.log("About to parse transcript response", html);
 
   return parseXmlResponse(html);
 }
